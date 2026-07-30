@@ -1,55 +1,12 @@
-# # Core dependencies
-# fastapi==0.104.1
-# uvicorn[standard]==0.24.0
-# pydantic==2.5.0
-# pydantic-settings==2.1.0
-# sqlalchemy==2.0.23
-# alembic==1.13.1
-
-# # Database - MySQL support
-# pymysql==1.1.0
-# cryptography==41.0.7
-
-# # Computer Vision (simplified for Windows)
-# ultralytics==8.1.0
-# opencv-python==4.8.1.78
-# numpy>=1.21.0
-
-# # Utilities
-# python-multipart==0.0.6
-# python-jose[cryptography]==3.3.0
-# passlib[bcrypt]==1.7.4
-# python-decouple==3.8
-
-# # Development
-# pytest==7.4.3
-# pytest-asyncio==0.21.1
-# passlib[bcrypt]==1.7.4
-# python-decouple==3.8
-
-# # Development
-# pytest==7.4.3
-# pytest-asyncio==0.21.1
-# black==23.11.0
-# isort==5.12.0
-# flake8==6.1.0
-
-# # Optional: For Redis caching
-# redis==5.0.1
-# aioredis==2.0.1
-
-
-# Core dependencies
+# Core
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
-sqlalchemy==2.0.23
-alembic==1.13.1
 
-# Database
-pymysql==1.1.0
-cryptography==41.0.7
+# MongoDB
+motor==3.3.2
+pymongo==4.6.1
 
 # Computer Vision
 ultralytics==8.1.0
@@ -60,7 +17,6 @@ torchvision
 
 # Utilities
 python-multipart==0.0.6
-python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 python-decouple==3.8
 
@@ -70,7 +26,3 @@ pytest-asyncio==0.21.1
 black==23.11.0
 isort==5.12.0
 flake8==6.1.0
-
-# Optional caching
-redis==5.0.1
-aioredis==2.0.1

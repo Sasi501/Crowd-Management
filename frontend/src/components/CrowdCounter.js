@@ -94,7 +94,7 @@ function makeTracker() {
 // ══════════════════════════════════════════════════════════════════════════
 //  MODE 1 — Single camera + line crossing
 // ══════════════════════════════════════════════════════════════════════════
-function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
+function LineCrossingMode({ crowd, setCrowd, maxCapacity, setEntries, setExits }) {
   const [isStreaming, setIsStreaming]   = useState(false);
   const [detData, setDetData]           = useState(null);
   const [error, setError]               = useState('');
@@ -113,9 +113,10 @@ function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
   useEffect(() => { crowdRef.current = crowd; }, [crowd]);
 
   // track which IDs already crossed which line so we don't double-count
-  const crossedEntryRef = useRef(new Set());
-  const crossedExitRef  = useRef(new Set());
+  const firstLineHitRef = useRef(new Map()); // id -> 'top' | 'bottom'
   const alertFiredRef   = useRef(new Set()); // track which severity already alerted
+  const heatmapPointsRef = useRef([]);      // [{x, y, time}]
+  const [showHeatmap, setShowHeatmap] = useState(false);
 
   // load device list
   useEffect(() => {
@@ -183,30 +184,62 @@ function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
 
             data.detections.forEach((det) => {
               const cy = det.centroid.y * sy;
-              if (cy >= entryY && !crossedEntryRef.current.has(det.id)) {
-                crossedEntryRef.current.add(det.id);
-                crossedExitRef.current.delete(det.id);
-                const newCount = crowdRef.current + 1;
-                setCrowd(newCount);
-                logCrowd('line_crossing', 'line', newCount, 1, det.confidence, det.id);
-                // alert check
-                const pct = newCount / maxCapacity;
-                if (pct >= 1.0 && !alertFiredRef.current.has('critical')) {
-                  alertFiredRef.current.add('critical');
-                  logAlert(newCount, maxCapacity, 'critical', `CRITICAL: Crowd ${newCount} reached full capacity ${maxCapacity}`);
-                } else if (pct >= 0.7 && !alertFiredRef.current.has('warning')) {
-                  alertFiredRef.current.add('warning');
-                  logAlert(newCount, maxCapacity, 'warning', `WARNING: Crowd ${newCount} is at ${Math.round(pct*100)}% of capacity ${maxCapacity}`);
+              const id = det.id;
+
+              // If person hits Top Line (30%)
+              if (cy <= entryY) {
+                if (!firstLineHitRef.current.has(id)) {
+                  firstLineHitRef.current.set(id, 'top');
+                } else if (firstLineHitRef.current.get(id) === 'bottom') {
+                  // Bottom -> Top = EXIT
+                  const newCount = Math.max(0, crowdRef.current - 1);
+                  setCrowd(newCount);
+                  setExits(x => x + 1);
+                  logCrowd('line_crossing', 'line', newCount, -1, det.confidence, id);
+                  firstLineHitRef.current.delete(id); // reset for this person
                 }
-                if (pct < 0.7) alertFiredRef.current.clear();
               }
-              if (cy >= exitY && crossedEntryRef.current.has(det.id) && !crossedExitRef.current.has(det.id)) {
-                crossedExitRef.current.add(det.id);
-                const newCount = Math.max(0, crowdRef.current - 1);
-                setCrowd(newCount);
-                logCrowd('line_crossing', 'line', newCount, -1, det.confidence, det.id);
+
+              // If person hits Bottom Line (70%)
+              if (cy >= exitY) {
+                if (!firstLineHitRef.current.has(id)) {
+                  firstLineHitRef.current.set(id, 'bottom');
+                } else if (firstLineHitRef.current.get(id) === 'top') {
+                  // Top -> Bottom = ENTRY
+                  const newCount = crowdRef.current + 1;
+                  setCrowd(newCount);
+                  setEntries(e => e + 1);
+                  logCrowd('line_crossing', 'line', newCount, 1, det.confidence, id);
+                  firstLineHitRef.current.delete(id); // reset for this person
+                  
+                  // alert check
+                  const pct = newCount / maxCapacity;
+                  if (pct >= 1.0 && !alertFiredRef.current.has('critical')) {
+                    alertFiredRef.current.add('critical');
+                    logAlert(newCount, maxCapacity, 'critical', `CRITICAL: Crowd ${newCount} reached full capacity ${maxCapacity}`);
+                  } else if (pct >= 0.7 && !alertFiredRef.current.has('warning')) {
+                    alertFiredRef.current.add('warning');
+                    logAlert(newCount, maxCapacity, 'warning', `WARNING: Crowd ${newCount} is at ${Math.round(pct*100)}% of capacity ${maxCapacity}`);
+                  }
+                  // Only reset when crowd drops meaningfully below 50% to avoid alert spam on small oscillations
+                  if (pct < 0.5) alertFiredRef.current.clear();
+                }
               }
             });
+
+            // ── Heatmap logic ──
+            const now = Date.now();
+            const sx_heatmap = canvas.width / (data.source_width || 640);
+            const sy_heatmap = canvas.height / (data.source_height || 480);
+            const newPoints = (data.detections || []).map(det => ({
+              x: det.centroid.x * sx_heatmap,
+              y: det.centroid.y * sy_heatmap,
+              time: now
+            }));
+            heatmapPointsRef.current = [
+              ...heatmapPointsRef.current.filter(p => now - p.time < 5000), // persist 5s
+              ...newPoints
+            ];
 
             setDetData({ ...data, canvasW: canvas.width, canvasH: canvas.height });
           }
@@ -249,12 +282,27 @@ function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
     ctx.fillStyle = '#FF4136';
     ctx.fillText('▶ EXIT LINE', 8, H * 0.70 - 6);
 
+    // Heatmap drawing
+    if (showHeatmap) {
+      ctx.globalAlpha = 0.4;
+      heatmapPointsRef.current.forEach(p => {
+        const rad = 25;
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, rad);
+        grad.addColorStop(0, 'rgba(255, 0, 0, 0.8)');
+        grad.addColorStop(0.5, 'rgba(255, 255, 0, 0.4)');
+        grad.addColorStop(1, 'rgba(255, 255, 0, 0)');
+        ctx.fillStyle = grad;
+        ctx.beginPath(); ctx.arc(p.x, p.y, rad, 0, Math.PI * 2); ctx.fill();
+      });
+      ctx.globalAlpha = 1.0;
+    }
+
     drawDetections(ctx, detData.detections || [], detData.source_width || 640, detData.source_height || 480, W, H);
   }, [detData]);
 
   return (
     <div className="cc-panel">
-      <h3>📹 Mode 1 — Line Crossing (Single Camera)</h3>
+      <h3>Line Crossing — Single Camera</h3>
 
       {!isStreaming && (
         <div className="cc-controls">
@@ -269,10 +317,17 @@ function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
           ) : (
             <input className="cc-input" placeholder="http:// or rtsp://" value={urlInput} onChange={e=>setUrlInput(e.target.value)}/>
           )}
-          <button className="cc-btn-start" onClick={start}>🎥 Start</button>
+          <button className="cc-btn-start" onClick={start}>Start Camera</button>
         </div>
       )}
-      {isStreaming && <button className="cc-btn-stop" onClick={stop}>⛔ Stop</button>}
+      {isStreaming && (
+        <div style={{display:'flex', gap:10, marginBottom:10}}>
+          <button className="cc-btn-stop" onClick={stop}>Stop</button>
+          <button className={`btn-secondary ${showHeatmap ? 'active' : ''}`} onClick={() => setShowHeatmap(!showHeatmap)}>
+            {showHeatmap ? '🔥 Hide Heatmap' : '❄️ Show Heatmap'}
+          </button>
+        </div>
+      )}
       {error && <div className="cc-error">{error}</div>}
 
       <div className="cc-video-wrap">
@@ -283,8 +338,8 @@ function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
 
       {detData && (
         <div className="cc-stats-row">
-          <span>👥 Detected: <b>{detData.person_count}</b></span>
-          <span>🎯 Confidence: <b>{Math.round((detData.confidence_score||0)*100)}%</b></span>
+          <span>Detected: <b>{detData.person_count}</b></span>
+          <span>Confidence: <b>{Math.round((detData.confidence_score||0)*100)}%</b></span>
         </div>
       )}
     </div>
@@ -294,16 +349,16 @@ function LineCrossingMode({ crowd, setCrowd, maxCapacity }) {
 // ══════════════════════════════════════════════════════════════════════════
 //  MODE 2 — Dual camera IN / OUT
 // ══════════════════════════════════════════════════════════════════════════
-function DualCameraMode({ setCrowd, maxCapacity }) {
+function DualCameraMode({ crowd, setCrowd, maxCapacity, setEntries, setExits }) {
   return (
     <div className="cc-dual">
-      <SingleFeed label="IN  ➕" role="in"  setCrowd={setCrowd} maxCapacity={maxCapacity} />
-      <SingleFeed label="OUT ➖" role="out" setCrowd={setCrowd} maxCapacity={maxCapacity} />
+      <SingleFeed label="IN"  role="in"  crowd={crowd} setCrowd={setCrowd} maxCapacity={maxCapacity} onCount={() => setEntries(e => e + 1)} />
+      <SingleFeed label="OUT" role="out" crowd={crowd} setCrowd={setCrowd} maxCapacity={maxCapacity} onCount={() => setExits(x => x + 1)} />
     </div>
   );
 }
 
-function SingleFeed({ label, role, setCrowd, maxCapacity }) {
+function SingleFeed({ label, role, crowd, setCrowd, maxCapacity, onCount }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [detData, setDetData]         = useState(null);
   const [error, setError]             = useState('');
@@ -318,7 +373,9 @@ function SingleFeed({ label, role, setCrowd, maxCapacity }) {
   const streamRef  = useRef(null);
   const processingRef  = useRef(false);
   const trackerRef     = useRef(makeTracker());
-  const crowdRef = useRef(0);
+  // crowdRef stays in sync with the global crowd prop so both feeds see the latest value
+  const crowdRef = useRef(crowd);
+  useEffect(() => { crowdRef.current = crowd; }, [crowd]);
   const countedIdsRef  = useRef(new Set());
   const alertFiredRef  = useRef(new Set());
 
@@ -389,6 +446,7 @@ function SingleFeed({ label, role, setCrowd, maxCapacity }) {
                   : Math.max(0, crowdRef.current - 1);
                 crowdRef.current = newCount;
                 setCrowd(newCount);
+                onCount();
                 logCrowd('dual_camera', role, newCount, delta, det.confidence, det.id);
                 // alert check (only on IN side)
                 if (role === 'in') {
@@ -400,7 +458,8 @@ function SingleFeed({ label, role, setCrowd, maxCapacity }) {
                     alertFiredRef.current.add('warning');
                     logAlert(newCount, maxCapacity, 'warning', `WARNING: Crowd ${newCount} is at ${Math.round(pct*100)}% of capacity ${maxCapacity}`);
                   }
-                  if (pct < 0.7) alertFiredRef.current.clear();
+                  // Only reset when crowd drops meaningfully below 50% to avoid re-firing on small oscillations
+                  if (pct < 0.5) alertFiredRef.current.clear();
                 }
               }
             });
@@ -443,10 +502,10 @@ function SingleFeed({ label, role, setCrowd, maxCapacity }) {
           ) : (
             <input className="cc-input" placeholder="http:// or rtsp://" value={urlInput} onChange={e=>setUrlInput(e.target.value)}/>
           )}
-          <button className="cc-btn-start" onClick={start}>🎥 Start</button>
+          <button className="cc-btn-start" onClick={start}>Start Camera</button>
         </div>
       )}
-      {isStreaming && <button className="cc-btn-stop" onClick={stop}>⛔ Stop</button>}
+      {isStreaming && <button className="cc-btn-stop" onClick={stop}>Stop</button>}
       {error && <div className="cc-error">{error}</div>}
 
       <div className="cc-video-wrap">
@@ -457,8 +516,8 @@ function SingleFeed({ label, role, setCrowd, maxCapacity }) {
 
       {detData && (
         <div className="cc-stats-row">
-          <span>👥 <b>{detData.person_count}</b></span>
-          <span>🎯 <b>{Math.round((detData.confidence_score||0)*100)}%</b></span>
+          <span>Detected: <b>{detData.person_count}</b></span>
+          <span>Confidence: <b>{Math.round((detData.confidence_score||0)*100)}%</b></span>
           <span>IDs counted: <b>{countedIdsRef.current.size}</b></span>
         </div>
       )}
@@ -469,25 +528,35 @@ function SingleFeed({ label, role, setCrowd, maxCapacity }) {
 // ══════════════════════════════════════════════════════════════════════════
 //  ROOT — mode switcher
 // ══════════════════════════════════════════════════════════════════════════
-export default function CrowdCounter({ crowd, setCrowd, maxCapacity }) {
+export default function CrowdCounter({ crowd, setCrowd, maxCapacity, setEntries, setExits }) {
   const [mode, setMode] = useState('line');
+
+  // When the user switches counting modes, reset the crowd count and entry/exit
+  // tallies so the new mode starts fresh and doesn't inherit a stale count.
+  const handleModeChange = (newMode) => {
+    if (newMode === mode) return;
+    setCrowd(0);
+    setEntries(0);
+    setExits(0);
+    setMode(newMode);
+  };
 
   return (
     <div className="cc-root">
       <div className="cc-mode-bar">
         <span className="cc-mode-label">Counting Mode:</span>
-        <button className={`cc-mode-btn ${mode==='line' ? 'active':''}`} onClick={()=>setMode('line')}>
-          📏 Line Crossing
+        <button className={`cc-mode-btn ${mode==='line' ? 'active':''}`} onClick={()=>handleModeChange('line')}>
+          Line Crossing
         </button>
-        <button className={`cc-mode-btn ${mode==='dual' ? 'active':''}`} onClick={()=>setMode('dual')}>
-          📷📷 Dual Camera
+        <button className={`cc-mode-btn ${mode==='dual' ? 'active':''}`} onClick={()=>handleModeChange('dual')}>
+          Dual Camera
         </button>
       </div>
 
       {mode === 'line' ? (
-        <LineCrossingMode crowd={crowd} setCrowd={setCrowd} maxCapacity={maxCapacity} />
+        <LineCrossingMode crowd={crowd} setCrowd={setCrowd} maxCapacity={maxCapacity} setEntries={setEntries} setExits={setExits} />
       ) : (
-        <DualCameraMode crowd={crowd} setCrowd={setCrowd} maxCapacity={maxCapacity} />
+        <DualCameraMode crowd={crowd} setCrowd={setCrowd} maxCapacity={maxCapacity} setEntries={setEntries} setExits={setExits} />
       )}
     </div>
   );

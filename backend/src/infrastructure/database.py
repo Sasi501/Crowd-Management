@@ -1,103 +1,83 @@
 """
-Database configuration and SQLAlchemy models
+MongoDB database configuration using Motor (async driver).
+
+Collections:
+  users       — login accounts
+  crowd_logs  — every crowd-count change event
+  alert_logs  — capacity alert records
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, Text, Enum
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.sql import func
-import pymysql
-pymysql.install_as_MySQLdb()
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ASCENDING, DESCENDING, IndexModel
+import logging
 
 from src.config import settings
 
-DATABASE_URL = settings.database_url
-if DATABASE_URL.startswith("mysql") and "charset" not in DATABASE_URL:
-    DATABASE_URL += ("&" if "?" in DATABASE_URL else "?") + "charset=utf8mb4"
+logger = logging.getLogger(__name__)
 
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-    pool_size=10,
-    max_overflow=20
-)
-
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# ── Client & database ──────────────────────────────────────────────────────
+# A single Motor client is created at module level and reused across requests.
+# Motor manages its own internal connection pool.
+_client: AsyncIOMotorClient = None
+_db = None
 
 
-def init_database():
-    """Create DB + all tables if they don't exist"""
-    if DATABASE_URL.startswith("mysql"):
-        from urllib.parse import urlparse
-        from sqlalchemy import text
-        parsed = urlparse(DATABASE_URL)
-        db_name = parsed.path.lstrip('/').split('?')[0]
-        base_url = f"{parsed.scheme}://{parsed.username}:{parsed.password}@{parsed.hostname}:{parsed.port or 3306}"
-        tmp = create_engine(base_url)
-        with tmp.connect() as conn:
-            conn.execute(text(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"))
-            conn.commit()
-        tmp.dispose()
-    Base.metadata.create_all(bind=engine)
+def get_client() -> AsyncIOMotorClient:
+    global _client
+    if _client is None:
+        _client = AsyncIOMotorClient(settings.mongodb_uri)
+    return _client
 
 
-# ── Users ──────────────────────────────────────────────────────────────────
-class UserDB(Base):
-    __tablename__ = "users"
-    id         = Column(Integer, primary_key=True, index=True)
-    username   = Column(String(100), unique=True, nullable=False, index=True)
-    password   = Column(String(255), nullable=False)
-    role       = Column(String(50),  nullable=False)
-    email      = Column(String(255), nullable=True)
-    full_name  = Column(String(255), nullable=True)
-    department = Column(String(100), nullable=True)
-    is_active  = Column(Boolean, default=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    last_login = Column(DateTime(timezone=True), nullable=True)
+def get_database():
+    global _db
+    if _db is None:
+        _db = get_client()[settings.mongodb_db]
+    return _db
 
 
-# ── Crowd logs (one row per count change) ─────────────────────────────────
-class CrowdLogDB(Base):
+# ── Collection accessors ───────────────────────────────────────────────────
+def get_users_col():
+    return get_database()["users"]
+
+def get_crowd_logs_col():
+    return get_database()["crowd_logs"]
+
+def get_alert_logs_col():
+    return get_database()["alert_logs"]
+
+
+# ── Index creation on startup ──────────────────────────────────────────────
+async def init_database():
     """
-    Stores every crowd-count snapshot.
-    mode   : 'line_crossing' | 'dual_camera'
-    source : 'in' | 'out' | 'line'   (which camera/line triggered it)
+    Called once at application startup.
+    Creates indexes so queries are fast even with large collections.
     """
-    __tablename__ = "crowd_logs"
-    id            = Column(Integer, primary_key=True, index=True)
-    mode          = Column(Enum("line_crossing", "dual_camera"), nullable=False)
-    source        = Column(String(20), nullable=False)          # 'in' / 'out' / 'line'
-    crowd_count   = Column(Integer, nullable=False)             # total crowd at this moment
-    delta         = Column(Integer, nullable=False)             # +1 or -1
-    confidence    = Column(Float,   nullable=True)
-    person_id     = Column(Integer, nullable=True)              # tracked person ID
-    timestamp     = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
-
-# ── Alerts ─────────────────────────────────────────────────────────────────
-class AlertLogDB(Base):
-    """
-    Fired whenever crowd_count crosses max_capacity threshold.
-    severity: 'warning' (>=70%) | 'critical' (>=100%)
-    """
-    __tablename__ = "alert_logs"
-    id            = Column(Integer, primary_key=True, index=True)
-    crowd_count   = Column(Integer, nullable=False)
-    max_capacity  = Column(Integer, nullable=False)
-    severity      = Column(Enum("warning", "critical"), nullable=False)
-    message       = Column(Text,    nullable=False)
-    is_resolved   = Column(Boolean, default=False)
-    resolved_at   = Column(DateTime(timezone=True), nullable=True)
-    triggered_at  = Column(DateTime(timezone=True), server_default=func.now(), index=True)
-
-
-# ── DB session dependency ──────────────────────────────────────────────────
-def get_db():
-    db = SessionLocal()
     try:
-        yield db
-    finally:
-        db.close()
+        db = get_database()
+
+        # users: unique index on username
+        await db["users"].create_index("username", unique=True)
+        await db["users"].create_index("reset_token", sparse=True)
+
+        # crowd_logs: timestamp descending for recent-first queries
+        await db["crowd_logs"].create_index([("timestamp", DESCENDING)])
+
+        # alert_logs: timestamp descending + is_resolved for filter queries
+        await db["alert_logs"].create_index([("triggered_at", DESCENDING)])
+        await db["alert_logs"].create_index("is_resolved")
+
+        logger.info("MongoDB indexes ensured successfully")
+    except Exception as e:
+        logger.error(f"Failed to create MongoDB indexes: {e}")
+        raise
+
+
+async def close_database():
+    """Called on application shutdown to cleanly close the connection."""
+    global _client, _db
+    if _client is not None:
+        _client.close()
+        _client = None
+        _db = None
+        logger.info("MongoDB connection closed")

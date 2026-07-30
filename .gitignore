@@ -51,7 +51,7 @@ logs/
 *.db
 *.sqlite3
 
-# Environment variables
+# Environment variables — NEVER commit real credentials
 .env
 .env.local
 .env.production
@@ -62,24 +62,29 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# React
+# React build output
 build/
 coverage/
 
 # Docker
 .dockerignore
 
-# Uploads
+# Uploads / media
 uploads/
 *.jpg
+*.jpeg
 *.png
 *.mp4
 
-# Models
+# YOLO model weights
 *.pt
 *.pth
 yolov8*.pt
 
-# Temporary files
+# Temporary / debug scripts
 tmp/
 temp/
+seed_users.py
+check_users.py
+test_passlib.py
+test_mongo.py

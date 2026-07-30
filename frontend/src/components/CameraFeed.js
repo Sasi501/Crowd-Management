@@ -159,21 +159,20 @@ function CameraFeed() {
       {error && <div className="error-message">{error}</div>}
 
       {!isStreaming ? (
-        <button onClick={startWebcam} className="start-webcam-btn">🎥 Start Webcam</button>
+        <button onClick={startWebcam} className="start-webcam-btn">Start Camera</button>
       ) : (
-        <button onClick={stopWebcam} className="stop-webcam-btn">⛔ Stop Webcam</button>
+        <button onClick={stopWebcam} className="stop-webcam-btn">Stop Camera</button>
       )}
 
       <div className="video-section">
         <video ref={videoRef} className="video-feed" autoPlay playsInline width="640" height="480" />
-        <canvas ref={canvasRef} style={{ display: 'none' }} />
-        <canvas ref={overlayRef} className="overlay-canvas" width="640" height="480" />
+        <canvas ref={canvasRef} style={{ display: 'none' }} />        <canvas ref={overlayRef} className="overlay-canvas" width="640" height="480" />
       </div>
 
       {detectionData && (
         <div className="detection-results">
-          <p>👥 Persons: {detectionData.person_count}</p>
-          <p>🎯 Confidence: {Math.round((detectionData.confidence_score || 0) * 100)}%</p>
+          <p>Persons detected: <strong>{detectionData.person_count}</strong></p>
+          <p>Confidence: <strong>{Math.round((detectionData.confidence_score || 0) * 100)}%</strong></p>
         </div>
       )}
     </div>
